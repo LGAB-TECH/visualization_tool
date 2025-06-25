@@ -5,7 +5,6 @@ import plotly.graph_objects as go
 from scipy.stats import pearsonr, spearmanr, kendalltau
 from sklearn.feature_selection import mutual_info_regression, mutual_info_classif
 
-# ---- Page Configuration and Styling ----
 st.set_page_config(
     page_title="Smart Data Analyzer",
     page_icon="📊",
@@ -13,7 +12,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS
+# --- Custom CSS ---
 st.markdown(
     """
     <style>
@@ -37,12 +36,11 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# Display user info in a styled container
 st.markdown(
     f"""
     <div class="user-info">
         <p style="margin:0; color:#1e3c72; font-size:0.9em;">
-            <strong>🕒 Current Time (UTC):</strong> 2025-06-24 19:09:05<br>
+            <strong>🕒 Current Time (UTC):</strong> 2025-06-25 14:51:53<br>
             <strong>👤 User:</strong> LGAB-TECH
         </p>
     </div>
@@ -55,7 +53,6 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# ---- Sidebar for File Selection Mode ----
 with st.sidebar:
     st.markdown("## File Selection Mode")
     file_mode = st.radio(
@@ -66,7 +63,6 @@ with st.sidebar:
 
 df = None
 
-# ---- Multi-file Upload and Combine ----
 if file_mode == "Multiple CSV Merge & Analysis":
     st.markdown("### 📁 Combine Multiple CSV Files (by Primary Key)", unsafe_allow_html=True)
     uploaded_files = st.file_uploader(
@@ -90,13 +86,10 @@ if file_mode == "Multiple CSV Merge & Analysis":
             except Exception as e:
                 st.error(f"❌ Error reading {file.name}: {e}")
 
-        # Show columns of each file for key selection
         st.markdown("#### Columns in each file:")
         cols_dict = {file_names[i]: dfs[i].columns.tolist() for i in range(len(dfs))}
         for fname, cols in cols_dict.items():
             st.write(f"**{fname}**: {cols}")
-
-        # Intersect columns for candidate primary keys (FIXED LINE)
         common_cols = list(set.intersection(*(set(cols) for cols in cols_dict.values())))
         if common_cols:
             selected_keys = st.multiselect("🔑 Select primary key column(s) for merging:", common_cols, default=[common_cols[0]])
@@ -107,7 +100,6 @@ if file_mode == "Multiple CSV Merge & Analysis":
                 - right: All rows from the last file, matching from others
             """)
             if st.button("🔗 Merge Files"):
-                # Merge iteratively
                 merged_df = dfs[0]
                 for d in dfs[1:]:
                     merged_df = pd.merge(merged_df, d, on=selected_keys, how=how, suffixes=('', '_dup'))
@@ -117,7 +109,6 @@ if file_mode == "Multiple CSV Merge & Analysis":
         else:
             st.warning("⚠️ No common columns found across all CSVs. Cannot merge.")
 
-# ---- Single file upload fallback ----
 if file_mode == "Single CSV Analysis":
     uploaded_file = st.file_uploader(
         "📂 <span style='font-size:19px;color:#2a5298;'>Upload your CSV or Excel file</span>",
@@ -127,7 +118,6 @@ if file_mode == "Single CSV Analysis":
     )
     if uploaded_file:
         try:
-            # Read the file
             if uploaded_file.name.endswith(".csv"):
                 df = pd.read_csv(uploaded_file)
             else:
@@ -137,92 +127,78 @@ if file_mode == "Single CSV Analysis":
             st.error(f"❌ Error processing file: {str(e)}")
             df = None
 
-def clean_and_preprocess_data(df):
-    """Automatically clean and preprocess the dataframe"""
+def clean_and_fill_all_but_allna(df):
+    """Clean dataframe by dropping only all-NA columns, converting numerics, filling NA with mean/mode."""
     if df is None:
-        return None
-   
-    # Clean column names
+        return None, [], []
+    df = df.copy()
     df.columns = df.columns.str.strip()
-   
-    # Drop columns with all missing values
-    initial_cols = len(df.columns)
-    df.dropna(axis=1, how='all', inplace=True)
-    dropped_cols = initial_cols - len(df.columns)
-    if dropped_cols > 0:
-        st.warning(f"⚠️ Dropped {dropped_cols} columns with all missing values")
-   
-    # Handle missing values
+    # Drop columns that are all NA
+    allna_cols = df.columns[df.isna().all()].tolist()
+    df = df.drop(columns=allna_cols)
+    cleaned_columns = []
+    # Try to convert all columns to numeric if possible (coerce errors to NaN)
     for col in df.columns:
-        # For numeric columns: fill with mean
+        df[col] = pd.to_numeric(df[col], errors='ignore')
+    for col in df.columns:
         if pd.api.types.is_numeric_dtype(df[col]):
             if df[col].isnull().any():
                 mean_val = df[col].mean()
-                df[col].fillna(mean_val, inplace=True)
-                st.info(f"Filled missing values in numeric column '{col}' with mean: {mean_val:.2f}")
-        # For categorical/object columns: fill with mode
+                df[col] = df[col].fillna(mean_val)
+                cleaned_columns.append(col)
         elif pd.api.types.is_categorical_dtype(df[col]) or df[col].dtype == 'object':
             if df[col].isnull().any():
                 mode_val = df[col].mode()[0] if not df[col].mode().empty else "unknown"
-                df[col].fillna(mode_val, inplace=True)
-                st.info(f"Filled missing values in categorical column '{col}' with mode: '{mode_val}'")
-   
-    # Clean string data
-    for col in df.select_dtypes(include=['object']).columns:
-        df[col] = df[col].astype(str).str.strip().str.lower()
-   
-    return df
+                df[col] = df[col].fillna(mode_val)
+                cleaned_columns.append(col)
+            df[col] = df[col].astype(str).str.strip().str.lower()
+    return df, cleaned_columns, allna_cols
 
 if df is not None:
-    # Clean and preprocess the data automatically
-    df = clean_and_preprocess_data(df)
-   
-    # Create tabs
+    # Clean and keep track of columns that had missing values filled
+    df_clean, cleaned_columns, allna_cols = clean_and_fill_all_but_allna(df)
+    df = df_clean  # Use only cleaned data globally
+
     tabs = st.tabs([
         "📋 Data Overview",
         "📈 Correlation & MI Analysis",
         "📊 Bar Plot"
     ])
 
-    # ---- Data Overview Tab ----
     with tabs[0]:
         st.markdown("<h3 style='color:#1e3c72;'>📋 Dataset Overview</h3>", unsafe_allow_html=True)
-       
-        # Show basic info
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("**Dataset Shape**")
             st.write(f"{df.shape[0]} rows × {df.shape[1]} columns")
-       
         with col2:
             st.markdown("**Missing Values After Cleaning**")
             st.write("No missing values remaining" if df.isnull().sum().sum() == 0 else
                     f"{df.isnull().sum().sum()} missing values remaining")
-       
-        # Show data types
         st.markdown("<h4 style='color:#2a5298;margin-top:20px;'>📝 Data Types</h4>", unsafe_allow_html=True)
         dtypes_df = pd.DataFrame({
             'Column Name': df.columns,
             'Data Type': [str(df[col].dtype) for col in df.columns],
-            'Sample Values': [str(df[col].head(3).tolist()) for col in df.columns]
+            'Sample Values': [str(df[col].head(3).tolist()) for col in df.columns],
+            'Missing Cleaned': [("Yes" if col in cleaned_columns else "No") for col in df.columns]
         })
         st.dataframe(
             dtypes_df,
             use_container_width=True,
             height=400
         )
-       
-        # Show data preview
+        if allna_cols:
+            st.markdown(
+                f"<span style='color:#FF9900;'>Dropped columns with all missing values: <b>{', '.join(allna_cols)}</b></span>",
+                unsafe_allow_html=True
+            )
         st.markdown("<h4 style='color:#2a5298;margin-top:20px;'>🔍 Data Preview</h4>", unsafe_allow_html=True)
         st.dataframe(df.head(10), use_container_width=True)
 
-    # ---- Correlation & Mutual Information Analysis Tab ----
     with tabs[1]:
         st.markdown("<h3 style='color:#1e3c72;'>🔥 Correlation Analysis</h3>", unsafe_allow_html=True)
-       
-        # Get numeric columns only
+        # Use all numeric columns except all-NA
         numeric_df = df.select_dtypes(include=np.number)
-       
         if not numeric_df.empty:
             correlation_type = st.selectbox(
                 "📊 Select Correlation Method:",
@@ -230,18 +206,16 @@ if df is not None:
                 help="Pearson: Linear correlation\nSpearman: Monotonic correlation\nKendall: Ordinal correlation"
             )
             show_vals = st.checkbox("🔢 Show correlation values", value=True)
-           
             if correlation_type == "Spearman":
                 corr = numeric_df.corr(method='spearman')
             elif correlation_type == "Kendall":
                 corr = numeric_df.corr(method='kendall')
-            else:  # Pearson (default)
+            else:
                 corr = numeric_df.corr(method='pearson')
-
+            corr = corr.fillna(0)
             n_vars = len(corr.columns)
             text_size = max(8, min(10, int(400 / n_vars)))
             hover_text = np.round(corr, 2).astype(str)
-           
             fig = go.Figure(data=go.Heatmap(
                 z=corr,
                 x=corr.columns,
@@ -256,8 +230,6 @@ if df is not None:
                 colorscale="RdBu_r",
                 showscale=True
             ))
-           
-            matrix_size = max(500, min(800, 100 * n_vars))
             fig.update_layout(
                 title=dict(
                     text=f"Interactive {correlation_type} Correlation Matrix",
@@ -265,50 +237,54 @@ if df is not None:
                     xanchor='center',
                     font=dict(size=20, color='#1e3c72')
                 ),
-                width=matrix_size,
-                height=matrix_size,
+                width=max(500, min(800, 100 * n_vars)),
+                height=max(500, min(800, 100 * n_vars)),
                 xaxis=dict(
                     tickangle=45,
-                    tickfont=dict(size=text_size),
+                    tickfont=dict(size=text_size, color="black"),
                     showgrid=False
                 ),
                 yaxis=dict(
-                    tickfont=dict(size=text_size),
+                    tickfont=dict(size=text_size, color="black"),
                     showgrid=False,
                     autorange='reversed'
                 ),
                 margin=dict(
                     l=100,
                     r=50,
-                    t=100,
+                    t=120,
                     b=100
                 )
             )
             st.plotly_chart(fig, use_container_width=True)
+            if cleaned_columns:
+                st.markdown(
+                    "<span style='color:#FF9900;'>Columns that had missing values filled and are included in the correlation matrix: <b>{}</b></span>".format(", ".join([col for col in numeric_df.columns if col in cleaned_columns])),
+                    unsafe_allow_html=True
+                )
+            if allna_cols:
+                st.markdown(
+                    "<span style='color:#FF3333;'>Columns dropped from correlation matrix because they were all NA: <b>{}</b></span>".format(", ".join(allna_cols)),
+                    unsafe_allow_html=True
+                )
 
-            # ---- Mutual Information Visualization ----
             st.markdown("<h4 style='color:#2a5298;margin-top:30px;'>🎯 Mutual Information with Target</h4>", unsafe_allow_html=True)
             all_cols = df.columns.tolist()
             target_col = st.selectbox("Select target column:", all_cols)
-           
             if target_col:
                 features = [col for col in df.columns if col != target_col]
                 target_data = df[target_col]
-               
                 if pd.api.types.is_numeric_dtype(target_data):
                     task_type = st.radio("Is your target variable a classification or regression task?",
                                        ["Regression", "Classification"], index=0)
                 else:
                     task_type = "Classification"
-               
                 X = df[features].copy()
                 for col in X.select_dtypes(include=["object", "category"]).columns:
                     X[col], _ = X[col].factorize()
-               
                 y = target_data
                 if task_type == "Classification":
                     y, _ = pd.factorize(y)
-               
                 try:
                     if task_type == "Regression":
                         mi = mutual_info_regression(X, y, random_state=0)
@@ -317,11 +293,9 @@ if df is not None:
                 except Exception as e:
                     st.error(f"Mutual information calculation failed: {e}")
                     mi = None
-               
                 if mi is not None:
                     mi_series = pd.Series(mi, index=features)
                     mi_sorted = mi_series.sort_values(ascending=False)
-                   
                     fig_mi = go.Figure()
                     fig_mi.add_trace(go.Bar(
                         x=mi_sorted.values,
@@ -336,7 +310,6 @@ if df is not None:
                         ),
                         hovertemplate='<b>%{y}</b><br>Mutual Info: %{x:.3f}<extra></extra>'
                     ))
-                   
                     fig_mi.update_layout(
                         title=dict(
                             text=f"Mutual Information of Variables with {target_col}",
@@ -394,7 +367,6 @@ if df is not None:
                         ]
                     )
                     st.plotly_chart(fig_mi, use_container_width=True)
-                   
                     st.markdown("<h4 style='color:#2a5298;margin-top:20px;'>📊 Mutual Information Details</h4>", unsafe_allow_html=True)
                     st.dataframe(
                         pd.DataFrame({
@@ -407,13 +379,10 @@ if df is not None:
         else:
             st.warning("⚠️ No numeric columns found in the dataset!")
 
-    # ---- Bar Plot Tab ----
     with tabs[2]:
         st.markdown("<h3 style='color:#1e3c72;'>📊 Custom Bar Plot</h3>", unsafe_allow_html=True)
-       
         categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
         numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
-       
         if categorical_cols and numeric_cols:
             col1, col2 = st.columns(2)
             with col1:
@@ -434,7 +403,6 @@ if df is not None:
                     default=x_axis_values
                 )
                 filtered_df = df[df[x_axis].isin(selected_x_values)]
-               
                 if plot_type != "Grouped Bar with Separators":
                     agg_func = st.selectbox(
                         "📐 Aggregation Function:",
@@ -449,7 +417,6 @@ if df is not None:
                         Maximum: Largest value
                         """
                     )
-           
             with col2:
                 y_axis = st.selectbox("📏 Select Y-axis (numeric):", numeric_cols)
                 if plot_type == "Grouped Bar with Separators":
@@ -461,17 +428,14 @@ if df is not None:
                     bar_color = st.color_picker("🎨 Select Bar Color:", "#FF0000")
                 else:
                     show_average = st.checkbox("Show Average Line", value=True)
-               
                 if plot_type == "Stacked Bar":
                     stack_column = st.selectbox(
                         "🔢 Select Stacking Column:",
                         [col for col in categorical_cols if col != x_axis],
                         help="Select a categorical column to stack by"
                     )
-           
             if st.button("📈 Generate Plot"):
                 fig = go.Figure()
-               
                 if plot_type == "Grouped Bar":
                     group_df = filtered_df[[x_axis, y_axis]].groupby(x_axis)
                     if agg_func == "Sum":
@@ -490,13 +454,11 @@ if df is not None:
                         y_data = group_df.max().reset_index()
                     else:
                         y_data = group_df.sum().reset_index()
-                   
                     fig.add_trace(go.Bar(
                         x=y_data[x_axis],
                         y=y_data[y_axis],
                         marker_color="#1e3c72"
                     ))
-                   
                     if show_average:
                         avg = y_data[y_axis].mean()
                         fig.add_shape(
@@ -509,14 +471,12 @@ if df is not None:
                             x=0.95, y=avg, xref="paper", yref="y", text=f"Avg: {avg:.2f}",
                             showarrow=False, font=dict(color="red"), align="right"
                         )
-                   
                     fig.update_layout(
                         barmode='group',
                         xaxis_title=x_axis,
                         yaxis_title=y_axis,
                         title=f"{agg_func} of {y_axis} by {x_axis}"
                     )
-               
                 elif plot_type == "Stacked Bar":
                     group_df = filtered_df[[x_axis, stack_column, y_axis]]
                     if agg_func == "Sum":
@@ -535,7 +495,6 @@ if df is not None:
                         plot_df = group_df.groupby([x_axis, stack_column])[y_axis].max().reset_index()
                     else:
                         plot_df = group_df.groupby([x_axis, stack_column])[y_axis].sum().reset_index()
-                   
                     for s in plot_df[stack_column].unique():
                         df_s = plot_df[plot_df[stack_column] == s]
                         fig.add_trace(go.Bar(
@@ -543,7 +502,6 @@ if df is not None:
                             y=df_s[y_axis],
                             name=str(s)
                         ))
-                   
                     if show_average:
                         avg = plot_df[y_axis].mean()
                         fig.add_shape(
@@ -556,26 +514,22 @@ if df is not None:
                             x=0.95, y=avg, xref="paper", yref="y", text=f"Avg: {avg:.2f}",
                             showarrow=False, font=dict(color="red"), align="right"
                         )
-                   
                     fig.update_layout(
                         barmode='stack',
                         xaxis_title=x_axis,
                         yaxis_title=y_axis,
                         title=f"{agg_func} of {y_axis} by {x_axis} and {stack_column}"
                     )
-               
                 else:  # Grouped Bar with Separators
                     plot_data = filtered_df[[x_axis, group_column, y_axis]]
                     group_vals = plot_data[group_column].unique()
                     x_vals = plot_data[x_axis].unique()
                     bar_width = 0.8 / len(group_vals)
-                   
                     for i, group in enumerate(group_vals):
                         y_vals = []
                         for x in x_vals:
                             val = plot_data[(plot_data[x_axis] == x) & (plot_data[group_column] == group)][y_axis]
                             y_vals.append(val.mean() if len(val) > 0 else 0)
-                       
                         fig.add_trace(go.Bar(
                             x=x_vals,
                             y=y_vals,
@@ -584,7 +538,6 @@ if df is not None:
                             offsetgroup=i,
                             width=bar_width
                         ))
-                   
                     for idx in range(1, len(x_vals)):
                         fig.add_shape(
                             type="line",
@@ -592,16 +545,13 @@ if df is not None:
                             y0=0, y1=max([max(trace.y) if len(trace.y)>0 else 0 for trace in fig.data]),
                             line=dict(color="gray", dash="dash")
                         )
-                   
                     fig.update_layout(
                         barmode='group',
                         xaxis_title=x_axis,
                         yaxis_title=y_axis,
                         title=f"Grouped Bar with Separators: {y_axis} by {x_axis} and {group_column}"
                     )
-               
                 st.plotly_chart(fig, use_container_width=True)
-               
                 st.markdown("<h4 style='color:#2a5298;margin-top:20px;'>📊 Summary Statistics</h4>", unsafe_allow_html=True)
                 if plot_type == "Grouped Bar":
                     stats_df = filtered_df[[x_axis, y_axis]][y_axis].describe().round(2)
