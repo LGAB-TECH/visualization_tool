@@ -18,9 +18,6 @@ st.markdown(
     <style>
     .main { background-color: #f5f7fa; }
     .stApp header {background: linear-gradient(90deg,#1e3c72,#2a5298); color:white;}
-    .stTabs [data-baseweb="tab-list"] { background: #e3eafc; border-radius: 8px 8px 0 0;}
-    .stTabs [data-baseweb="tab"] { font-weight: bold; font-size: 18px;}
-    .stTabs [data-baseweb="tab"]:focus { background: #d1e0fc;}
     .stButton>button { background-color: #2a5298; color: white; font-weight: bold; border-radius: 8px;}
     .stButton>button:hover { background-color: #1e3c72; color: #fff;}
     .stSelectbox > div { background: #eef3fb;}
@@ -40,7 +37,7 @@ st.markdown(
     f"""
     <div class="user-info">
         <p style="margin:0; color:#1e3c72; font-size:0.9em;">
-            <strong>🕒 Current Time (UTC):</strong> 2025-06-26 15:11:39<br>
+            <strong>🕒 Current Time (UTC):</strong> 2025-06-26 15:30:18<br>
             <strong>👤 User:</strong> LGAB-TECH
         </p>
     </div>
@@ -53,16 +50,6 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# --- Session State Initialization ---
-if "df" not in st.session_state:
-    st.session_state["df"] = None
-if "cleaned_columns" not in st.session_state:
-    st.session_state["cleaned_columns"] = []
-if "allna_cols" not in st.session_state:
-    st.session_state["allna_cols"] = []
-if "file_mode" not in st.session_state:
-    st.session_state["file_mode"] = None
-
 with st.sidebar:
     st.markdown("## File Selection Mode")
     file_mode = st.radio(
@@ -70,12 +57,8 @@ with st.sidebar:
         ("Single CSV Analysis", "Multiple CSV Merge & Analysis"),
         help="Select if you want to analyze a single CSV or merge multiple CSVs before analysis."
     )
-    # Optionally, provide a reset button
-    if st.button("🔄 Reset App"):
-        for k in ["df", "cleaned_columns", "allna_cols", "file_mode"]:
-            if k in st.session_state:
-                del st.session_state[k]
-        st.experimental_rerun()
+
+df = None
 
 def clean_and_fill_all_but_allna(df):
     """Clean dataframe by dropping only all-NA columns, converting numerics, filling NA with mean/mode."""
@@ -104,6 +87,7 @@ def clean_and_fill_all_but_allna(df):
             df[col] = df[col].astype(str).str.strip().str.lower()
     return df, cleaned_columns, allna_cols
 
+# ---- File Upload & Merge Logic with Session State ----
 if file_mode == "Multiple CSV Merge & Analysis":
     st.markdown("### 📁 Combine Multiple CSV Files (by Primary Key)", unsafe_allow_html=True)
     uploaded_files = st.file_uploader(
@@ -146,11 +130,13 @@ if file_mode == "Multiple CSV Merge & Analysis":
                     merged_df = pd.merge(merged_df, d, on=selected_keys, how=how, suffixes=('', '_dup'))
                 st.success(f"✅ Merged {len(uploaded_files)} files on {selected_keys} ({how} join).")
                 st.dataframe(merged_df.head(10), use_container_width=True)
-                # --- Save to session state ---
-                st.session_state["df"], st.session_state["cleaned_columns"], st.session_state["allna_cols"] = clean_and_fill_all_but_allna(merged_df)
-                st.session_state["file_mode"] = "Multiple"
+                st.session_state['merged_df'] = merged_df.copy()
         else:
             st.warning("⚠️ No common columns found across all CSVs. Cannot merge.")
+
+    # Always set df from session_state if exists
+    if 'merged_df' in st.session_state:
+        df = st.session_state['merged_df']
 
 elif file_mode == "Single CSV Analysis":
     uploaded_file = st.file_uploader(
@@ -166,26 +152,33 @@ elif file_mode == "Single CSV Analysis":
             else:
                 df = pd.read_excel(uploaded_file)
             st.success("✅ File uploaded successfully!")
-            # --- Save to session state ---
-            st.session_state["df"], st.session_state["cleaned_columns"], st.session_state["allna_cols"] = clean_and_fill_all_but_allna(df)
-            st.session_state["file_mode"] = "Single"
+            st.session_state['merged_df'] = df.copy()
         except Exception as e:
             st.error(f"❌ Error processing file: {str(e)}")
-            st.session_state["df"] = None
+            df = None
+    if 'merged_df' in st.session_state:
+        df = st.session_state['merged_df']
 
-# --- Retrieve from session state for downstream tabs ---
-df = st.session_state.get("df")
-cleaned_columns = st.session_state.get("cleaned_columns", [])
-allna_cols = st.session_state.get("allna_cols", [])
+tab_labels = [
+    "📋 Data Overview",
+    "📈 Correlation & MI Analysis",
+    "📊 Bar Plot"
+]
+if "tab_radio" not in st.session_state:
+    st.session_state["tab_radio"] = tab_labels[0]
+selected_tab = st.radio("Navigation", tab_labels, horizontal=True, key="tab_radio")
+
+def goto_bar_plot_tab():
+    st.session_state["tab_radio"] = tab_labels[2]
+    st.session_state["show_bar_plot"] = True
+    st.rerun()  # Use st.rerun() instead of st.experimental_rerun()
 
 if df is not None:
-    tabs = st.tabs([
-        "📋 Data Overview",
-        "📈 Correlation & MI Analysis",
-        "📊 Bar Plot"
-    ])
+    # Clean and keep track of columns that had missing values filled
+    df_clean, cleaned_columns, allna_cols = clean_and_fill_all_but_allna(df)
+    df = df_clean  # Use only cleaned data globally
 
-    with tabs[0]:
+    if selected_tab == tab_labels[0]:
         st.markdown("<h3 style='color:#1e3c72;'>📋 Dataset Overview</h3>", unsafe_allow_html=True)
         col1, col2 = st.columns(2)
         with col1:
@@ -215,7 +208,7 @@ if df is not None:
         st.markdown("<h4 style='color:#2a5298;margin-top:20px;'>🔍 Data Preview</h4>", unsafe_allow_html=True)
         st.dataframe(df.head(10), use_container_width=True)
 
-    with tabs[1]:
+    elif selected_tab == tab_labels[1]:
         st.markdown("<h3 style='color:#1e3c72;'>🔥 Correlation Analysis</h3>", unsafe_allow_html=True)
         numeric_df = df.select_dtypes(include=np.number)
         if not numeric_df.empty:
@@ -398,7 +391,7 @@ if df is not None:
         else:
             st.warning("⚠️ No numeric columns found in the dataset!")
 
-    with tabs[2]:
+    elif selected_tab == tab_labels[2]:
         st.markdown("<h3 style='color:#1e3c72;'>📊 Custom Bar Plot</h3>", unsafe_allow_html=True)
         categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
         numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
@@ -453,7 +446,11 @@ if df is not None:
                         [col for col in categorical_cols if col != x_axis],
                         help="Select a categorical column to stack by"
                     )
-            if st.button("📈 Generate Plot"):
+
+            if st.button("📈 Generate Plot", on_click=goto_bar_plot_tab):
+                st.session_state["show_bar_plot"] = True
+            # Plot only if explicitly requested
+            if st.session_state.get("show_bar_plot", False):
                 fig = go.Figure()
                 if plot_type == "Grouped Bar":
                     group_df = filtered_df[[x_axis, y_axis]].groupby(x_axis)
@@ -572,23 +569,22 @@ if df is not None:
                     )
                 st.plotly_chart(fig, use_container_width=True)
                 st.markdown("<h4 style='color:#2a5298;margin-top:20px;'>📊 Summary Statistics</h4>", unsafe_allow_html=True)
-                # ---- Remove .style.background_gradient (fix ImportError) ----
                 if plot_type == "Grouped Bar":
                     stats_df = filtered_df[[x_axis, y_axis]][y_axis].describe().round(2)
                     st.dataframe(
-                        pd.DataFrame(stats_df).T,
+                        pd.DataFrame(stats_df).T.style.background_gradient(cmap='Blues'),
                         use_container_width=True
                     )
                 elif plot_type == "Stacked Bar":
                     stats_df = filtered_df[[x_axis, stack_column, y_axis]].groupby(stack_column)[y_axis].describe().round(2)
                     st.dataframe(
-                        stats_df,
+                        stats_df.style.background_gradient(cmap='Blues'),
                         use_container_width=True
                     )
                 else:
                     stats_df = plot_data.groupby(group_column)[y_axis].describe().round(2)
                     st.dataframe(
-                        stats_df,
+                        stats_df.style.background_gradient(cmap='Blues'),
                         use_container_width=True
                     )
         else:
