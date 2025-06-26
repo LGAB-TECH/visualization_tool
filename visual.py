@@ -66,11 +66,9 @@ def clean_and_fill_all_but_allna(df):
         return None, [], []
     df = df.copy()
     df.columns = df.columns.str.strip()
-    # Drop columns that are all NA
     allna_cols = df.columns[df.isna().all()].tolist()
     df = df.drop(columns=allna_cols)
     cleaned_columns = []
-    # Try to convert all columns to numeric if possible (coerce errors to NaN)
     for col in df.columns:
         df[col] = pd.to_numeric(df[col], errors='ignore')
     for col in df.columns:
@@ -87,7 +85,6 @@ def clean_and_fill_all_but_allna(df):
             df[col] = df[col].astype(str).str.strip().str.lower()
     return df, cleaned_columns, allna_cols
 
-# ---- File Upload & Merge Logic with Session State ----
 if file_mode == "Multiple CSV Merge & Analysis":
     st.markdown("### 📁 Combine Multiple CSV Files (by Primary Key)", unsafe_allow_html=True)
     uploaded_files = st.file_uploader(
@@ -170,7 +167,7 @@ selected_tab = st.radio("Navigation", tab_labels, horizontal=True, key="tab_radi
 def goto_bar_plot_tab():
     st.session_state["tab_radio"] = tab_labels[2]
     st.session_state["show_bar_plot"] = True
-    st.rerun()  # Use st.rerun() instead of st.experimental_rerun()
+    st.rerun()
 
 if df is not None:
     df_clean, cleaned_columns, allna_cols = clean_and_fill_all_but_allna(df)
@@ -447,9 +444,9 @@ if df is not None:
 
             if st.button("📈 Generate Plot", on_click=goto_bar_plot_tab):
                 st.session_state["show_bar_plot"] = True
-            # Plot only if explicitly requested
             if st.session_state.get("show_bar_plot", False):
                 fig = go.Figure()
+                average_drawn = False  # Track if average line is drawn
                 if plot_type == "Grouped Bar":
                     group_df = filtered_df[[x_axis, y_axis]].groupby(x_axis)
                     if agg_func == "Sum":
@@ -473,18 +470,27 @@ if df is not None:
                         y=y_data[y_axis],
                         marker_color="#1e3c72"
                     ))
-                    if show_average:
+                    if show_average and len(y_data) > 0 and y_data[y_axis].notna().any():
                         avg = y_data[y_axis].mean()
+                        x_range = y_data[x_axis]
+                        if pd.api.types.is_numeric_dtype(x_range):
+                            x0 = float(np.min(x_range))
+                            x1 = float(np.max(x_range))
+                        else:
+                            x0 = -0.4
+                            x1 = len(x_range) - 0.6
                         fig.add_shape(
                             type="line",
-                            x0=min(y_data[x_axis]), x1=max(y_data[x_axis]),
+                            x0=x0, x1=x1,
                             y0=avg, y1=avg,
+                            xref="x", yref="y",
                             line=dict(color="red", dash="dash"),
                         )
                         fig.add_annotation(
-                            x=0.95, y=avg, xref="paper", yref="y", text=f"Avg: {avg:.2f}",
+                            x=x1, y=avg, xref="x", yref="y", text=f"Avg: {avg:.2f}",
                             showarrow=False, font=dict(color="red"), align="right"
                         )
+                        average_drawn = True
                     fig.update_layout(
                         barmode='group',
                         xaxis_title=x_axis,
@@ -516,18 +522,27 @@ if df is not None:
                             y=df_s[y_axis],
                             name=str(s)
                         ))
-                    if show_average:
+                    if show_average and len(plot_df) > 0 and plot_df[y_axis].notna().any():
                         avg = plot_df[y_axis].mean()
+                        x_range = plot_df[x_axis]
+                        if pd.api.types.is_numeric_dtype(x_range):
+                            x0 = float(np.min(x_range))
+                            x1 = float(np.max(x_range))
+                        else:
+                            x0 = -0.4
+                            x1 = len(x_range) - 0.6
                         fig.add_shape(
                             type="line",
-                            x0=min(plot_df[x_axis]), x1=max(plot_df[x_axis]),
+                            x0=x0, x1=x1,
                             y0=avg, y1=avg,
+                            xref="x", yref="y",
                             line=dict(color="red", dash="dash"),
                         )
                         fig.add_annotation(
-                            x=0.95, y=avg, xref="paper", yref="y", text=f"Avg: {avg:.2f}",
+                            x=x1, y=avg, xref="x", yref="y", text=f"Avg: {avg:.2f}",
                             showarrow=False, font=dict(color="red"), align="right"
                         )
+                        average_drawn = True
                     fig.update_layout(
                         barmode='stack',
                         xaxis_title=x_axis,
@@ -552,11 +567,27 @@ if df is not None:
                             offsetgroup=i,
                             width=bar_width
                         ))
+                    if show_average and len(plot_data) > 0 and plot_data[y_axis].notna().any():
+                        avg = plot_data[y_axis].mean()
+                        x0 = -0.4
+                        x1 = len(x_vals) - 0.6
+                        fig.add_shape(
+                            type="line",
+                            x0=x0, x1=x1,
+                            y0=avg, y1=avg,
+                            xref="x", yref="y",
+                            line=dict(color="red", dash="dash"),
+                        )
+                        fig.add_annotation(
+                            x=x1, y=avg, xref="x", yref="y", text=f"Avg: {avg:.2f}",
+                            showarrow=False, font=dict(color="red"), align="right"
+                        )
+                        average_drawn = True
                     for idx in range(1, len(x_vals)):
                         fig.add_shape(
                             type="line",
                             x0=idx-0.5, x1=idx-0.5,
-                            y0=0, y1=max([max(trace.y) if len(trace.y)>0 else 0 for trace in fig.data]),
+                            y0=0, y1=max([max(trace.y) if len(trace.y) > 0 else 0 for trace in fig.data]),
                             line=dict(color="gray", dash="dash")
                         )
                     fig.update_layout(
@@ -566,8 +597,9 @@ if df is not None:
                         title=f"Grouped Bar with Separators: {y_axis} by {x_axis} and {group_column}"
                     )
                 st.plotly_chart(fig, use_container_width=True)
+                if show_average and not average_drawn:
+                    st.info("Average line could not be drawn (insufficient data or all values missing).")
                 st.markdown("<h4 style='color:#2a5298;margin-top:20px;'>📊 Summary Statistics</h4>", unsafe_allow_html=True)
-                # Instead of .style.background_gradient (which requires matplotlib), just display raw DataFrame
                 if plot_type == "Grouped Bar":
                     stats_df = filtered_df[[x_axis, y_axis]][y_axis].describe().round(2)
                     st.dataframe(
