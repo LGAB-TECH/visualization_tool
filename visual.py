@@ -40,7 +40,7 @@ st.markdown(
     f"""
     <div class="user-info">
         <p style="margin:0; color:#1e3c72; font-size:0.9em;">
-            <strong>🕒 Current Time (UTC):</strong> 2025-06-26 14:01:11<br>
+            <strong>🕒 Current Time (UTC):</strong> 2025-06-26 15:11:39<br>
             <strong>👤 User:</strong> LGAB-TECH
         </p>
     </div>
@@ -53,6 +53,16 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+# --- Session State Initialization ---
+if "df" not in st.session_state:
+    st.session_state["df"] = None
+if "cleaned_columns" not in st.session_state:
+    st.session_state["cleaned_columns"] = []
+if "allna_cols" not in st.session_state:
+    st.session_state["allna_cols"] = []
+if "file_mode" not in st.session_state:
+    st.session_state["file_mode"] = None
+
 with st.sidebar:
     st.markdown("## File Selection Mode")
     file_mode = st.radio(
@@ -60,8 +70,39 @@ with st.sidebar:
         ("Single CSV Analysis", "Multiple CSV Merge & Analysis"),
         help="Select if you want to analyze a single CSV or merge multiple CSVs before analysis."
     )
+    # Optionally, provide a reset button
+    if st.button("🔄 Reset App"):
+        for k in ["df", "cleaned_columns", "allna_cols", "file_mode"]:
+            if k in st.session_state:
+                del st.session_state[k]
+        st.experimental_rerun()
 
-df = None
+def clean_and_fill_all_but_allna(df):
+    """Clean dataframe by dropping only all-NA columns, converting numerics, filling NA with mean/mode."""
+    if df is None:
+        return None, [], []
+    df = df.copy()
+    df.columns = df.columns.str.strip()
+    # Drop columns that are all NA
+    allna_cols = df.columns[df.isna().all()].tolist()
+    df = df.drop(columns=allna_cols)
+    cleaned_columns = []
+    # Try to convert all columns to numeric if possible (coerce errors to NaN)
+    for col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors='ignore')
+    for col in df.columns:
+        if pd.api.types.is_numeric_dtype(df[col]):
+            if df[col].isnull().any():
+                mean_val = df[col].mean()
+                df[col] = df[col].fillna(mean_val)
+                cleaned_columns.append(col)
+        elif pd.api.types.is_categorical_dtype(df[col]) or df[col].dtype == 'object':
+            if df[col].isnull().any():
+                mode_val = df[col].mode()[0] if not df[col].mode().empty else "unknown"
+                df[col] = df[col].fillna(mode_val)
+                cleaned_columns.append(col)
+            df[col] = df[col].astype(str).str.strip().str.lower()
+    return df, cleaned_columns, allna_cols
 
 if file_mode == "Multiple CSV Merge & Analysis":
     st.markdown("### 📁 Combine Multiple CSV Files (by Primary Key)", unsafe_allow_html=True)
@@ -105,11 +146,13 @@ if file_mode == "Multiple CSV Merge & Analysis":
                     merged_df = pd.merge(merged_df, d, on=selected_keys, how=how, suffixes=('', '_dup'))
                 st.success(f"✅ Merged {len(uploaded_files)} files on {selected_keys} ({how} join).")
                 st.dataframe(merged_df.head(10), use_container_width=True)
-                df = merged_df.copy()
+                # --- Save to session state ---
+                st.session_state["df"], st.session_state["cleaned_columns"], st.session_state["allna_cols"] = clean_and_fill_all_but_allna(merged_df)
+                st.session_state["file_mode"] = "Multiple"
         else:
             st.warning("⚠️ No common columns found across all CSVs. Cannot merge.")
 
-if file_mode == "Single CSV Analysis":
+elif file_mode == "Single CSV Analysis":
     uploaded_file = st.file_uploader(
         "📂 <span style='font-size:19px;color:#2a5298;'>Upload your CSV or Excel file</span>",
         type=["csv", "xlsx"],
@@ -123,42 +166,19 @@ if file_mode == "Single CSV Analysis":
             else:
                 df = pd.read_excel(uploaded_file)
             st.success("✅ File uploaded successfully!")
+            # --- Save to session state ---
+            st.session_state["df"], st.session_state["cleaned_columns"], st.session_state["allna_cols"] = clean_and_fill_all_but_allna(df)
+            st.session_state["file_mode"] = "Single"
         except Exception as e:
             st.error(f"❌ Error processing file: {str(e)}")
-            df = None
+            st.session_state["df"] = None
 
-def clean_and_fill_all_but_allna(df):
-    """Clean dataframe by dropping only all-NA columns, converting numerics, filling NA with mean/mode."""
-    if df is None:
-        return None, [], []
-    df = df.copy()
-    df.columns = df.columns.str.strip()
-    # Drop columns that are all NA
-    allna_cols = df.columns[df.isna().all()].tolist()
-    df = df.drop(columns=allna_cols)
-    cleaned_columns = []
-    # Try to convert all columns to numeric if possible (coerce errors to NaN)
-    for col in df.columns:
-        df[col] = pd.to_numeric(df[col], errors='ignore')
-    for col in df.columns:
-        if pd.api.types.is_numeric_dtype(df[col]):
-            if df[col].isnull().any():
-                mean_val = df[col].mean()
-                df[col] = df[col].fillna(mean_val)
-                cleaned_columns.append(col)
-        elif pd.api.types.is_categorical_dtype(df[col]) or df[col].dtype == 'object':
-            if df[col].isnull().any():
-                mode_val = df[col].mode()[0] if not df[col].mode().empty else "unknown"
-                df[col] = df[col].fillna(mode_val)
-                cleaned_columns.append(col)
-            df[col] = df[col].astype(str).str.strip().str.lower()
-    return df, cleaned_columns, allna_cols
+# --- Retrieve from session state for downstream tabs ---
+df = st.session_state.get("df")
+cleaned_columns = st.session_state.get("cleaned_columns", [])
+allna_cols = st.session_state.get("allna_cols", [])
 
 if df is not None:
-    # Clean and keep track of columns that had missing values filled
-    df_clean, cleaned_columns, allna_cols = clean_and_fill_all_but_allna(df)
-    df = df_clean  # Use only cleaned data globally
-
     tabs = st.tabs([
         "📋 Data Overview",
         "📈 Correlation & MI Analysis",
