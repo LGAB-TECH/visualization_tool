@@ -40,7 +40,7 @@ st.markdown(
     f"""
     <div class="user-info">
         <p style="margin:0; color:#1e3c72; font-size:0.9em;">
-            <strong>🕒 Current Time (UTC):</strong> 2025-06-25 14:51:53<br>
+            <strong>🕒 Current Time (UTC):</strong> 2025-06-26 14:01:11<br>
             <strong>👤 User:</strong> LGAB-TECH
         </p>
     </div>
@@ -197,7 +197,6 @@ if df is not None:
 
     with tabs[1]:
         st.markdown("<h3 style='color:#1e3c72;'>🔥 Correlation Analysis</h3>", unsafe_allow_html=True)
-        # Use all numeric columns except all-NA
         numeric_df = df.select_dtypes(include=np.number)
         if not numeric_df.empty:
             correlation_type = st.selectbox(
@@ -553,22 +552,23 @@ if df is not None:
                     )
                 st.plotly_chart(fig, use_container_width=True)
                 st.markdown("<h4 style='color:#2a5298;margin-top:20px;'>📊 Summary Statistics</h4>", unsafe_allow_html=True)
+                # ---- Remove .style.background_gradient (fix ImportError) ----
                 if plot_type == "Grouped Bar":
                     stats_df = filtered_df[[x_axis, y_axis]][y_axis].describe().round(2)
                     st.dataframe(
-                        pd.DataFrame(stats_df).T.style.background_gradient(cmap='Blues'),
+                        pd.DataFrame(stats_df).T,
                         use_container_width=True
                     )
                 elif plot_type == "Stacked Bar":
                     stats_df = filtered_df[[x_axis, stack_column, y_axis]].groupby(stack_column)[y_axis].describe().round(2)
                     st.dataframe(
-                        stats_df.style.background_gradient(cmap='Blues'),
+                        stats_df,
                         use_container_width=True
                     )
                 else:
                     stats_df = plot_data.groupby(group_column)[y_axis].describe().round(2)
                     st.dataframe(
-                        stats_df.style.background_gradient(cmap='Blues'),
+                        stats_df,
                         use_container_width=True
                     )
         else:
