@@ -134,7 +134,6 @@ if file_mode == "Multiple CSV Merge & Analysis":
         else:
             st.warning("⚠️ No common columns found across all CSVs. Cannot merge.")
 
-    # Always set df from session_state if exists
     if 'merged_df' in st.session_state:
         df = st.session_state['merged_df']
 
@@ -174,9 +173,8 @@ def goto_bar_plot_tab():
     st.rerun()  # Use st.rerun() instead of st.experimental_rerun()
 
 if df is not None:
-    # Clean and keep track of columns that had missing values filled
     df_clean, cleaned_columns, allna_cols = clean_and_fill_all_but_allna(df)
-    df = df_clean  # Use only cleaned data globally
+    df = df_clean
 
     if selected_tab == tab_labels[0]:
         st.markdown("<h3 style='color:#1e3c72;'>📋 Dataset Overview</h3>", unsafe_allow_html=True)
@@ -536,7 +534,7 @@ if df is not None:
                         yaxis_title=y_axis,
                         title=f"{agg_func} of {y_axis} by {x_axis} and {stack_column}"
                     )
-                else:  # Grouped Bar with Separators
+                else:
                     plot_data = filtered_df[[x_axis, group_column, y_axis]]
                     group_vals = plot_data[group_column].unique()
                     x_vals = plot_data[x_axis].unique()
@@ -569,22 +567,23 @@ if df is not None:
                     )
                 st.plotly_chart(fig, use_container_width=True)
                 st.markdown("<h4 style='color:#2a5298;margin-top:20px;'>📊 Summary Statistics</h4>", unsafe_allow_html=True)
+                # Instead of .style.background_gradient (which requires matplotlib), just display raw DataFrame
                 if plot_type == "Grouped Bar":
                     stats_df = filtered_df[[x_axis, y_axis]][y_axis].describe().round(2)
                     st.dataframe(
-                        pd.DataFrame(stats_df).T.style.background_gradient(cmap='Blues'),
+                        pd.DataFrame(stats_df).T,
                         use_container_width=True
                     )
                 elif plot_type == "Stacked Bar":
                     stats_df = filtered_df[[x_axis, stack_column, y_axis]].groupby(stack_column)[y_axis].describe().round(2)
                     st.dataframe(
-                        stats_df.style.background_gradient(cmap='Blues'),
+                        stats_df,
                         use_container_width=True
                     )
                 else:
                     stats_df = plot_data.groupby(group_column)[y_axis].describe().round(2)
                     st.dataframe(
-                        stats_df.style.background_gradient(cmap='Blues'),
+                        stats_df,
                         use_container_width=True
                     )
         else:
