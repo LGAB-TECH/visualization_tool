@@ -3,11 +3,10 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
-from scipy.stats import pearsonr, spearmanr, kendalltau
+import plotly.io as pio
+from scipy.stats import pearsonr, spearmanr, kendalltau, gaussian_kde
 from sklearn.feature_selection import mutual_info_regression, mutual_info_classif
-import io
 import tempfile
-import os
 from PIL import Image
 import base64
 from selenium import webdriver
@@ -47,7 +46,7 @@ st.markdown(
     f"""
     <div class="user-info">
         <p style="margin:0; color:#1e3c72; font-size:0.9em;">
-            <strong>🕒 Current Time (UTC):</strong> 2025-06-26 15:30:18<br>
+            <strong>🕒 Current Time (UTC):</strong> 2025-06-27 17:42:55<br>
             <strong>👤 User:</strong> LGAB-TECH
         </p>
     </div>
@@ -145,55 +144,35 @@ def save_plotly_as_png(fig):
             return img_bytes
         except ImportError:
             pass
-       
         # Fall back to Selenium screenshot
         return take_selenium_screenshot()
-   
     except Exception as e:
         st.error(f"Export failed: {str(e)}")
-        return None
-   
-    except Exception as e:
-        st.error(f"Failed to export identical plot: {str(e)}")
         return None
 
 def take_selenium_screenshot():
     """Capture the current Streamlit plot using Selenium"""
     try:
-        # Configure Chrome options
         chrome_options = Options()
         chrome_options.add_argument("--headless")
         chrome_options.add_argument("--start-maximized")
         chrome_options.add_argument("--force-device-scale-factor=2")
         chrome_options.add_argument("--hide-scrollbars")
-       
-        # Initialize the driver
         driver = webdriver.Chrome(
             service=Service(ChromeDriverManager().install()),
             options=chrome_options
         )
-       
         try:
-            # Capture the current Streamlit app
             driver.get("http://localhost:8501")
-           
-            # Wait for plot to render
             driver.implicitly_wait(5)
-           
-            # Find the most recent Plotly chart
             plot_element = driver.find_element("css selector", ".stPlotlyChart:last-child")
-           
-            # Add white background and padding
             driver.execute_script("""
                 arguments[0].style.background = 'white';
                 arguments[0].style.padding = '20px';
             """, plot_element)
-           
             return plot_element.screenshot_as_png
-           
         finally:
             driver.quit()
-           
     except Exception as e:
         st.error(f"Selenium screenshot failed: {str(e)}")
         return None
@@ -205,7 +184,7 @@ with st.sidebar:
         ("Single CSV Analysis", "Multiple CSV Merge & Analysis"),
         help="Select if you want to analyze a single CSV or merge multiple CSVs before analysis."
     )
-   
+
 df = None
 
 # ---- File Upload & Merge Logic with Session State ----
@@ -291,7 +270,7 @@ selected_tab = st.radio("Navigation", tab_labels, horizontal=True, key="tab_radi
 def goto_bar_plot_tab():
     st.session_state["tab_radio"] = tab_labels[2]
     st.session_state["show_bar_plot"] = True
-    st.rerun()  # Use st.rerun() instead of st.experimental_rerun()
+    st.rerun()
 
 if df is not None:
     df_clean, cleaned_columns, allna_cols = clean_and_fill_all_but_allna(df)
@@ -542,7 +521,6 @@ if df is not None:
                 if len(bell_data) < 2:
                     st.warning("Not enough data to plot a distribution curve.")
                 else:
-                    from scipy.stats import gaussian_kde
                     x_grid = np.linspace(bell_data.min(), bell_data.max(), 200)
                     kde = gaussian_kde(bell_data)
                     y_density = kde(x_grid)
@@ -585,7 +563,6 @@ if df is not None:
                     if len(data) < 2:
                         st.warning("Not enough data to plot a smooth area curve.")
                     else:
-                        from scipy.stats import gaussian_kde
                         x_grid = np.linspace(data.min(), data.max(), 200)
                         kde = gaussian_kde(data)
                         y_density = kde(x_grid)
@@ -610,7 +587,6 @@ if df is not None:
                         group_data = df[df[group_col] == group][smooth_col].dropna()
                         if len(group_data) < 2:
                             continue
-                        from scipy.stats import gaussian_kde
                         x_grid = np.linspace(group_data.min(), group_data.max(), 200)
                         kde = gaussian_kde(group_data)
                         y_density = kde(x_grid)
