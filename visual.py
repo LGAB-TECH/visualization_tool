@@ -9,10 +9,7 @@ from sklearn.feature_selection import mutual_info_regression, mutual_info_classi
 import tempfile
 from PIL import Image
 import base64
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
+
 
 st.set_page_config(
     page_title="Smart Data Analyzer",
