@@ -2,8 +2,18 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import plotly.express as px
 from scipy.stats import pearsonr, spearmanr, kendalltau
 from sklearn.feature_selection import mutual_info_regression, mutual_info_classif
+import io
+import tempfile
+import os
+from PIL import Image
+import base64
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 
 st.set_page_config(
     page_title="Smart Data Analyzer",
@@ -50,15 +60,40 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-with st.sidebar:
-    st.markdown("## File Selection Mode")
-    file_mode = st.radio(
-        "Choose analysis mode:",
-        ("Single CSV Analysis", "Multiple CSV Merge & Analysis"),
-        help="Select if you want to analyze a single CSV or merge multiple CSVs before analysis."
-    )
+# ---- Session state ----
+for k, v in {
+    "df": None, "charts": {},  "df_original": None, "show_bar_plot": False
+}.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
-df = None
+def auto_detect_and_convert_dtypes(df, cat_unique_thresh=20, cat_percent_thresh=0.1):
+    for col in df.columns:
+        series = df[col]
+        if pd.api.types.is_numeric_dtype(series) or pd.api.types.is_datetime64_any_dtype(series) or pd.api.types.is_categorical_dtype(series):
+            continue
+        coerced = pd.to_numeric(series, errors='coerce')
+        n_nonnull = series.notna().sum()
+        n_numeric = coerced.notna().sum()
+        if n_nonnull > 0 and n_numeric / n_nonnull > 0.9:
+            if (coerced.dropna() % 1 == 0).all():
+                if coerced.isna().sum() == 0:
+                    df[col] = coerced.astype(int)
+                else:
+                    df[col] = coerced.astype(float)
+            else:
+                df[col] = coerced.astype(float)
+            continue
+        coerced = pd.to_datetime(series, errors='coerce', infer_datetime_format=True)
+        n_datetime = coerced.notna().sum()
+        if n_nonnull > 0 and n_datetime / n_nonnull > 0.9:
+            df[col] = coerced
+            continue
+        n_unique = series.nunique(dropna=True)
+        if len(df) > 0 and (n_unique <= cat_unique_thresh or n_unique/len(df) <= cat_percent_thresh):
+            df[col] = series.astype('category')
+            continue
+    return df
 
 def clean_and_fill_all_but_allna(df):
     """Clean dataframe by dropping only all-NA columns, converting numerics, filling NA with mean/mode."""
@@ -66,9 +101,11 @@ def clean_and_fill_all_but_allna(df):
         return None, [], []
     df = df.copy()
     df.columns = df.columns.str.strip()
+    # Drop columns that are all NA
     allna_cols = df.columns[df.isna().all()].tolist()
     df = df.drop(columns=allna_cols)
     cleaned_columns = []
+    # Try to convert all columns to numeric if possible (coerce errors to NaN)
     for col in df.columns:
         df[col] = pd.to_numeric(df[col], errors='ignore')
     for col in df.columns:
@@ -85,6 +122,93 @@ def clean_and_fill_all_but_allna(df):
             df[col] = df[col].astype(str).str.strip().str.lower()
     return df, cleaned_columns, allna_cols
 
+def get_numeric_columns(df):
+    return df.select_dtypes(include=['int64', 'float64']).columns.tolist()
+
+def get_categorical_columns(df):
+    return df.select_dtypes(include=['category', 'object']).columns.tolist()
+
+def save_plotly_as_png(fig):
+    """Save the plot as PNG using either Kaleido or Selenium screenshot fallback"""
+    try:
+        # First try Kaleido if available
+        try:
+            import kaleido
+            img_bytes = pio.to_image(
+                fig,
+                format='png',
+                width=1200,
+                height=800,
+                scale=2,
+                engine="kaleido"
+            )
+            return img_bytes
+        except ImportError:
+            pass
+       
+        # Fall back to Selenium screenshot
+        return take_selenium_screenshot()
+   
+    except Exception as e:
+        st.error(f"Export failed: {str(e)}")
+        return None
+   
+    except Exception as e:
+        st.error(f"Failed to export identical plot: {str(e)}")
+        return None
+
+def take_selenium_screenshot():
+    """Capture the current Streamlit plot using Selenium"""
+    try:
+        # Configure Chrome options
+        chrome_options = Options()
+        chrome_options.add_argument("--headless")
+        chrome_options.add_argument("--start-maximized")
+        chrome_options.add_argument("--force-device-scale-factor=2")
+        chrome_options.add_argument("--hide-scrollbars")
+       
+        # Initialize the driver
+        driver = webdriver.Chrome(
+            service=Service(ChromeDriverManager().install()),
+            options=chrome_options
+        )
+       
+        try:
+            # Capture the current Streamlit app
+            driver.get("http://localhost:8501")
+           
+            # Wait for plot to render
+            driver.implicitly_wait(5)
+           
+            # Find the most recent Plotly chart
+            plot_element = driver.find_element("css selector", ".stPlotlyChart:last-child")
+           
+            # Add white background and padding
+            driver.execute_script("""
+                arguments[0].style.background = 'white';
+                arguments[0].style.padding = '20px';
+            """, plot_element)
+           
+            return plot_element.screenshot_as_png
+           
+        finally:
+            driver.quit()
+           
+    except Exception as e:
+        st.error(f"Selenium screenshot failed: {str(e)}")
+        return None
+
+with st.sidebar:
+    st.markdown("## File Selection Mode")
+    file_mode = st.radio(
+        "Choose analysis mode:",
+        ("Single CSV Analysis", "Multiple CSV Merge & Analysis"),
+        help="Select if you want to analyze a single CSV or merge multiple CSVs before analysis."
+    )
+   
+df = None
+
+# ---- File Upload & Merge Logic with Session State ----
 if file_mode == "Multiple CSV Merge & Analysis":
     st.markdown("### 📁 Combine Multiple CSV Files (by Primary Key)", unsafe_allow_html=True)
     uploaded_files = st.file_uploader(
@@ -158,7 +282,7 @@ elif file_mode == "Single CSV Analysis":
 tab_labels = [
     "📋 Data Overview",
     "📈 Correlation & MI Analysis",
-    "📊 Bar Plot"
+    "📊 Visualization"
 ]
 if "tab_radio" not in st.session_state:
     st.session_state["tab_radio"] = tab_labels[0]
@@ -167,7 +291,7 @@ selected_tab = st.radio("Navigation", tab_labels, horizontal=True, key="tab_radi
 def goto_bar_plot_tab():
     st.session_state["tab_radio"] = tab_labels[2]
     st.session_state["show_bar_plot"] = True
-    st.rerun()
+    st.rerun()  # Use st.rerun() instead of st.experimental_rerun()
 
 if df is not None:
     df_clean, cleaned_columns, allna_cols = clean_and_fill_all_but_allna(df)
@@ -387,239 +511,466 @@ if df is not None:
             st.warning("⚠️ No numeric columns found in the dataset!")
 
     elif selected_tab == tab_labels[2]:
-        st.markdown("<h3 style='color:#1e3c72;'>📊 Custom Bar Plot</h3>", unsafe_allow_html=True)
-        categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
-        numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
-        if categorical_cols and numeric_cols:
-            col1, col2 = st.columns(2)
-            with col1:
-                plot_type = st.selectbox(
-                    "📊 Plot Type:",
-                    ["Grouped Bar", "Stacked Bar", "Grouped Bar with Separators"],
-                    help="""
-                    Grouped Bar: Standard bar plot
-                    Stacked Bar: Bars stacked on top of each other
-                    Grouped Bar with Separators: Bars with vertical separators between groups
-                    """
-                )
-                x_axis = st.selectbox("🧭 Select X-axis (categorical):", categorical_cols)
-                x_axis_values = df[x_axis].unique().tolist()
-                selected_x_values = st.multiselect(
-                    f"Select {x_axis} values to display:",
-                    options=x_axis_values,
-                    default=x_axis_values
-                )
-                filtered_df = df[df[x_axis].isin(selected_x_values)]
-                if plot_type != "Grouped Bar with Separators":
-                    agg_func = st.selectbox(
-                        "📐 Aggregation Function:",
-                        ["Sum", "Mean", "Median", "Count", "Standard Deviation", "Minimum", "Maximum"],
-                        help="""
-                        Sum: Total of values
-                        Mean: Average of values
-                        Median: Middle value
-                        Count: Number of records
-                        Standard Deviation: Measure of variation
-                        Minimum: Smallest value
-                        Maximum: Largest value
-                        """
-                    )
-            with col2:
-                y_axis = st.selectbox("📏 Select Y-axis (numeric):", numeric_cols)
-                if plot_type == "Grouped Bar with Separators":
-                    group_column = st.selectbox(
-                        "🏷️ Select Group Column:",
-                        [col for col in categorical_cols if col != x_axis],
-                        help="Select a categorical column to group by"
-                    )
-                    bar_color = st.color_picker("🎨 Select Bar Color:", "#FF0000")
-                else:
-                    show_average = st.checkbox("Show Average Line", value=True)
-                if plot_type == "Stacked Bar":
-                    stack_column = st.selectbox(
-                        "🔢 Select Stacking Column:",
-                        [col for col in categorical_cols if col != x_axis],
-                        help="Select a categorical column to stack by"
-                    )
+        st.markdown("<h3 style='color:#1e3c72;'>📊 Visualization</h3>", unsafe_allow_html=True)
+        st.write("Create custom plots (Bar, Smooth Area, Line, Scatter, and Combinations)")
+        categorical_cols = get_categorical_columns(df)
+        numeric_cols = get_numeric_columns(df)
 
-            if st.button("📈 Generate Plot", on_click=goto_bar_plot_tab):
-                st.session_state["show_bar_plot"] = True
-            if st.session_state.get("show_bar_plot", False):
-                fig = go.Figure()
-                average_drawn = False  # Track if average line is drawn
-                if plot_type == "Grouped Bar":
-                    group_df = filtered_df[[x_axis, y_axis]].groupby(x_axis)
-                    if agg_func == "Sum":
-                        y_data = group_df.sum().reset_index()
-                    elif agg_func == "Mean":
-                        y_data = group_df.mean().reset_index()
-                    elif agg_func == "Median":
-                        y_data = group_df.median().reset_index()
-                    elif agg_func == "Count":
-                        y_data = group_df.count().reset_index()
-                    elif agg_func == "Standard Deviation":
-                        y_data = group_df.std().reset_index()
-                    elif agg_func == "Minimum":
-                        y_data = group_df.min().reset_index()
-                    elif agg_func == "Maximum":
-                        y_data = group_df.max().reset_index()
-                    else:
-                        y_data = group_df.sum().reset_index()
-                    fig.add_trace(go.Bar(
-                        x=y_data[x_axis],
-                        y=y_data[y_axis],
-                        marker_color="#1e3c72"
-                    ))
-                    if show_average and len(y_data) > 0 and y_data[y_axis].notna().any():
-                        avg = y_data[y_axis].mean()
-                        x_range = y_data[x_axis]
-                        if pd.api.types.is_numeric_dtype(x_range):
-                            x0 = float(np.min(x_range))
-                            x1 = float(np.max(x_range))
-                        else:
-                            x0 = -0.4
-                            x1 = len(x_range) - 0.6
-                        fig.add_shape(
-                            type="line",
-                            x0=x0, x1=x1,
-                            y0=avg, y1=avg,
-                            xref="x", yref="y",
-                            line=dict(color="red", dash="dash"),
-                        )
-                        fig.add_annotation(
-                            x=x1, y=avg, xref="x", yref="y", text=f"Avg: {avg:.2f}",
-                            showarrow=False, font=dict(color="red"), align="right"
-                        )
-                        average_drawn = True
-                    fig.update_layout(
-                        barmode='group',
-                        xaxis_title=x_axis,
-                        yaxis_title=y_axis,
-                        title=f"{agg_func} of {y_axis} by {x_axis}"
-                    )
-                elif plot_type == "Stacked Bar":
-                    group_df = filtered_df[[x_axis, stack_column, y_axis]]
-                    if agg_func == "Sum":
-                        plot_df = group_df.groupby([x_axis, stack_column])[y_axis].sum().reset_index()
-                    elif agg_func == "Mean":
-                        plot_df = group_df.groupby([x_axis, stack_column])[y_axis].mean().reset_index()
-                    elif agg_func == "Median":
-                        plot_df = group_df.groupby([x_axis, stack_column])[y_axis].median().reset_index()
-                    elif agg_func == "Count":
-                        plot_df = group_df.groupby([x_axis, stack_column])[y_axis].count().reset_index()
-                    elif agg_func == "Standard Deviation":
-                        plot_df = group_df.groupby([x_axis, stack_column])[y_axis].std().reset_index()
-                    elif agg_func == "Minimum":
-                        plot_df = group_df.groupby([x_axis, stack_column])[y_axis].min().reset_index()
-                    elif agg_func == "Maximum":
-                        plot_df = group_df.groupby([x_axis, stack_column])[y_axis].max().reset_index()
-                    else:
-                        plot_df = group_df.groupby([x_axis, stack_column])[y_axis].sum().reset_index()
-                    for s in plot_df[stack_column].unique():
-                        df_s = plot_df[plot_df[stack_column] == s]
-                        fig.add_trace(go.Bar(
-                            x=df_s[x_axis],
-                            y=df_s[y_axis],
-                            name=str(s)
-                        ))
-                    if show_average and len(plot_df) > 0 and plot_df[y_axis].notna().any():
-                        avg = plot_df[y_axis].mean()
-                        x_range = plot_df[x_axis]
-                        if pd.api.types.is_numeric_dtype(x_range):
-                            x0 = float(np.min(x_range))
-                            x1 = float(np.max(x_range))
-                        else:
-                            x0 = -0.4
-                            x1 = len(x_range) - 0.6
-                        fig.add_shape(
-                            type="line",
-                            x0=x0, x1=x1,
-                            y0=avg, y1=avg,
-                            xref="x", yref="y",
-                            line=dict(color="red", dash="dash"),
-                        )
-                        fig.add_annotation(
-                            x=x1, y=avg, xref="x", yref="y", text=f"Avg: {avg:.2f}",
-                            showarrow=False, font=dict(color="red"), align="right"
-                        )
-                        average_drawn = True
-                    fig.update_layout(
-                        barmode='stack',
-                        xaxis_title=x_axis,
-                        yaxis_title=y_axis,
-                        title=f"{agg_func} of {y_axis} by {x_axis} and {stack_column}"
-                    )
+        plot_type = st.selectbox(
+            "📊 Plot Type:",
+            [
+                "Grouped Bar",
+                "Stacked Bar",
+                "Grouped Bar with Separators",
+                "Side by Side Bar",
+                "Smooth Area Plot",
+                "Bell Curve Area Plot",
+                "Simple Line Plot",
+                "Grouped Line Plot",
+                "Scatter Plot"
+            ]
+        )
+
+        if plot_type == "Bell Curve Area Plot":
+            bell_col = st.selectbox("Select numeric column for bell curve (KDE):", numeric_cols)
+            show_hist = st.checkbox("Show histogram overlay", value=True)
+            xaxis_font_size = st.slider("Font Size for X-axis Values", min_value=6, max_value=32, value=12, key="bell_x_font_size")
+            yaxis_font_size = st.slider("Font Size for Y-axis Values", min_value=6, max_value=32, value=12, key="bell_y_font_size")
+            fig = go.Figure()
+            if bell_col:
+                bell_data = df[bell_col].dropna()
+                if len(bell_data) < 2:
+                    st.warning("Not enough data to plot a distribution curve.")
                 else:
-                    plot_data = filtered_df[[x_axis, group_column, y_axis]]
+                    from scipy.stats import gaussian_kde
+                    x_grid = np.linspace(bell_data.min(), bell_data.max(), 200)
+                    kde = gaussian_kde(bell_data)
+                    y_density = kde(x_grid)
+                    if show_hist:
+                        fig.add_trace(go.Histogram(
+                            x=bell_data,
+                            histnorm='probability density',
+                            opacity=0.3,
+                            name="Histogram",
+                            marker_color="#a5c8e1"
+                        ))
+                    fig.add_trace(go.Scatter(
+                        x=x_grid,
+                        y=y_density,
+                        mode='lines',
+                        fill='tozeroy',
+                        name="KDE",
+                        line=dict(color="#1e3c72", width=3),
+                    ))
+                    fig.update_layout(
+                        title=f"Bell Curve (KDE) Area Plot for {bell_col}",
+                        xaxis_title=bell_col,
+                        yaxis_title="Density",
+                        yaxis=dict(showgrid=False, tickfont=dict(size=yaxis_font_size)),
+                        xaxis=dict(tickfont=dict(size=xaxis_font_size)),
+                        margin=dict(t=100, b=100)
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                    st.session_state.charts["Visualization Chart"] = fig
+        elif plot_type == "Smooth Area Plot":
+            smooth_col = st.selectbox("Select numeric column for smooth area plot:", numeric_cols)
+            group_col = st.selectbox("Group by (optional):", ["None"] + categorical_cols)
+            show_hist = st.checkbox("Show histogram overlay", value=False)
+            xaxis_font_size = st.slider("Font Size for X-axis Values", min_value=6, max_value=32, value=12, key="smooth_x_font_size")
+            yaxis_font_size = st.slider("Font Size for Y-axis Values", min_value=6, max_value=32, value=12, key="smooth_y_font_size")
+            fig = go.Figure()
+            if smooth_col:
+                if group_col == "None":
+                    data = df[smooth_col].dropna()
+                    if len(data) < 2:
+                        st.warning("Not enough data to plot a smooth area curve.")
+                    else:
+                        from scipy.stats import gaussian_kde
+                        x_grid = np.linspace(data.min(), data.max(), 200)
+                        kde = gaussian_kde(data)
+                        y_density = kde(x_grid)
+                        if show_hist:
+                            fig.add_trace(go.Histogram(
+                                x=data,
+                                histnorm='probability density',
+                                opacity=0.3,
+                                name="Histogram",
+                                marker_color="#a5c8e1"
+                            ))
+                        fig.add_trace(go.Scatter(
+                            x=x_grid,
+                            y=y_density,
+                            mode='lines',
+                            fill='tozeroy',
+                            name="Smooth Area",
+                            line=dict(color="#1e3c72", width=3),
+                        ))
+                else:
+                    for i, group in enumerate(df[group_col].dropna().unique()):
+                        group_data = df[df[group_col] == group][smooth_col].dropna()
+                        if len(group_data) < 2:
+                            continue
+                        from scipy.stats import gaussian_kde
+                        x_grid = np.linspace(group_data.min(), group_data.max(), 200)
+                        kde = gaussian_kde(group_data)
+                        y_density = kde(x_grid)
+                        fig.add_trace(go.Scatter(
+                            x=x_grid,
+                            y=y_density,
+                            mode='lines',
+                            fill='tozeroy',
+                            name=str(group),
+                            line=dict(width=3),
+                        ))
+            fig.update_layout(
+                title=f"Smooth Area Plot for {smooth_col}" + (f" by {group_col}" if group_col != "None" else ""),
+                xaxis_title=smooth_col,
+                yaxis_title="Density",
+                yaxis=dict(showgrid=False, tickfont=dict(size=yaxis_font_size)),
+                xaxis=dict(tickfont=dict(size=xaxis_font_size)),
+                margin=dict(t=100, b=100)
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            st.session_state.charts["Visualization Chart"] = fig
+        else:
+            # Rest of the visualization code for other plot types
+            x_axis = st.selectbox("🧭 Select X-axis (categorical or numeric):", categorical_cols + numeric_cols)
+            x_axis_values = df[x_axis].dropna().unique().tolist() if x_axis in df.columns else []
+            selected_x_values = st.multiselect(
+                f"Select {x_axis} values to display:",
+                options=x_axis_values,
+                default=x_axis_values
+            ) if x_axis in categorical_cols else []
+            filtered_df = df[df[x_axis].isin(selected_x_values)] if x_axis in categorical_cols else df
+
+            y_axis = st.selectbox("📏 Select Y-axis (numeric):", numeric_cols)
+            agg_func = None
+            stack_column = None
+            group_column = None
+            bar_color = "#1e3c72"
+            show_average = False
+
+            with st.expander("Customize Plot Labels & Title", expanded=False):
+                custom_title = st.text_input("Plot Title (leave blank for auto)", key="custom_title")
+                custom_x_label = st.text_input("X-axis Label (leave blank for column name)", key="custom_x_label")
+                custom_y_label = st.text_input("Y-axis Label (leave blank for column name)", key="custom_y_label")
+                custom_legend_names = st.text_area("Legend Names (comma-separated, leave blank for auto)", key="custom_legend_names")
+                legend_names_list = [s.strip() for s in custom_legend_names.split(",")] if custom_legend_names else None
+                xaxis_font_size = st.slider("Font Size for X-axis Values", min_value=6, max_value=32, value=12, key="x_font_size")
+                yaxis_font_size = st.slider("Font Size for Y-axis Values", min_value=6, max_value=32, value=12, key="y_font_size")
+
+            if plot_type in ["Grouped Bar", "Stacked Bar", "Side by Side Bar"]:
+                agg_func = st.selectbox(
+                    "📐 Aggregation Function:",
+                    ["Sum", "Mean", "Median", "Count", "Standard Deviation", "Minimum", "Maximum"]
+                )
+            if plot_type in ["Grouped Bar", "Stacked Bar", "Simple Line Plot", "Scatter Plot", "Side by Side Bar"]:
+                show_average = st.checkbox("Show Average Line", value=True)
+            if plot_type == "Stacked Bar":
+                stack_column = st.selectbox(
+                    "🔢 Select Stacking Column:",
+                    [col for col in categorical_cols if col != x_axis]
+                )
+            if plot_type == "Grouped Bar with Separators":
+                group_column = st.selectbox(
+                    "🏷️ Select Group Column:",
+                    [col for col in categorical_cols if col != x_axis]
+                )
+                bar_color = st.color_picker("🎨 Select Bar Color:", "#FF0000")
+            if plot_type == "Grouped Line Plot":
+                group_column = st.selectbox(
+                    "🏷️ Select Group Column (for Line):",
+                    [col for col in categorical_cols if col != x_axis]
+                )
+            if plot_type == "Scatter Plot":
+                scatter_x_axis = st.selectbox("Scatter X-axis (numeric):", numeric_cols)
+                scatter_y_axis = st.selectbox("Scatter Y-axis (numeric):", [col for col in numeric_cols if col != scatter_x_axis])
+                scatter_color = st.selectbox("Color by (optional categorical):", ["None"] + categorical_cols)
+                scatter_size = st.selectbox("Size by (optional numeric):", ["None"] + numeric_cols)
+
+            if plot_type == "Side by Side Bar":
+                group_column = st.selectbox(
+                    "🏷️ Select Group Column (for Side by Side):",
+                    [col for col in categorical_cols if col != x_axis]
+                )
+                side_bar_colors = []
+                if group_column:
+                    unique_groups = filtered_df[group_column].unique()
+                    for i, g in enumerate(unique_groups):
+                        color = st.color_picker(f"Color for {g}:", px.colors.qualitative.Plotly[i % len(px.colors.qualitative.Plotly)], key=f"side_color_{g}")
+                        side_bar_colors.append(color)
+
+            fig = go.Figure()
+            func_map = {
+                "Sum": "sum",
+                "Mean": "mean",
+                "Median": "median",
+                "Count": "count",
+                "Standard Deviation": "std",
+                "Minimum": "min",
+                "Maximum": "max"
+            }
+            title = None
+
+            if plot_type == "Grouped Bar":
+                group_df = filtered_df[[x_axis, y_axis]].dropna().groupby(x_axis)
+                y_data = getattr(group_df, func_map[agg_func])().reset_index()
+                n_bars = len(y_data)
+                plot_width = max(500, min(80 * n_bars, 1600))
+                plot_height = 500 if n_bars < 10 else min(100 + 30 * n_bars, 800)
+                legend_name = legend_names_list[0] if legend_names_list else y_axis
+                fig = px.bar(
+                    y_data, x=x_axis, y=y_axis,
+                    color_discrete_sequence=px.colors.qualitative.Plotly,
+                    opacity=0.9,
+                    text_auto=True
+                )
+                if show_average and not y_data.empty:
+                    avg = y_data[y_axis].mean()
+                    fig.add_hline(y=avg, line_dash='dash', line_color='red', annotation_text=f"Avg: {avg:.2f}", annotation_position="top right")
+                title = f"{agg_func} of {y_axis} by {x_axis}"
+
+            elif plot_type == "Stacked Bar":
+                group_df = filtered_df[[x_axis, stack_column, y_axis]].dropna()
+                plot_df = getattr(group_df.groupby([x_axis, stack_column])[y_axis], func_map[agg_func])().reset_index()
+                n_x = plot_df[x_axis].nunique()
+                n_groups = plot_df[stack_column].nunique()
+                plot_width = max(600, min(90 * n_x, 1800))
+                plot_height = 500 if n_x < 10 else min(140 + 38 * n_x, 900)
+                fig = px.bar(
+                    plot_df, x=x_axis, y=y_axis, color=stack_column,
+                    color_discrete_sequence=px.colors.qualitative.Plotly,
+                    opacity=0.9,
+                    text_auto=True
+                )
+                if show_average and not plot_df.empty:
+                    avg = plot_df[y_axis].mean()
+                    fig.add_hline(y=avg, line_dash='dash', line_color='red', annotation_text=f"Avg: {avg:.2f}", annotation_position="top right")
+                title = f"{agg_func} of {y_axis} by {x_axis} and {stack_column}"
+
+            elif plot_type == "Grouped Bar with Separators":
+                plot_data = filtered_df[[x_axis, group_column, y_axis]].dropna()
+                means_df = plot_data.groupby([x_axis, group_column])[y_axis].mean().reset_index()
+                group_vals = plot_data[group_column].unique()
+                x_vals = plot_data[x_axis].unique()
+                bar_width = 0.8 / len(group_vals) if len(group_vals) else 0.8
+                for i, group in enumerate(group_vals):
+                    y_vals = []
+                    for x in x_vals:
+                        val = plot_data[(plot_data[x_axis] == x) & (plot_data[group_column] == group)][y_axis]
+                        y_vals.append(val.mean() if len(val) > 0 else 0)
+                    legend_name = (
+                        legend_names_list[i] if legend_names_list and i < len(legend_names_list)
+                        else str(group)
+                    )
+                    fig.add_trace(go.Bar(
+                        x=x_vals,
+                        y=y_vals,
+                        name=legend_name,
+                        marker_color=bar_color,
+                        offsetgroup=i,
+                        width=bar_width,
+                        marker_line_width=0
+                    ))
+                title = f"Grouped Bar with Separators: {y_axis} by {x_axis} and {group_column}"
+
+            elif plot_type == "Side by Side Bar":
+                plot_data = filtered_df[[x_axis, group_column, y_axis]].dropna()
+                if plot_data.empty:
+                    st.warning("No data available for selected combination.")
+                else:
+                    means_df = getattr(plot_data.groupby([x_axis, group_column])[y_axis], func_map[agg_func])().reset_index()
                     group_vals = plot_data[group_column].unique()
                     x_vals = plot_data[x_axis].unique()
-                    bar_width = 0.8 / len(group_vals)
+                    bar_width = 0.8 / len(group_vals) if len(group_vals) else 0.8
                     for i, group in enumerate(group_vals):
                         y_vals = []
                         for x in x_vals:
                             val = plot_data[(plot_data[x_axis] == x) & (plot_data[group_column] == group)][y_axis]
-                            y_vals.append(val.mean() if len(val) > 0 else 0)
+                            y_vals.append(getattr(val, func_map[agg_func])() if len(val) > 0 else 0)
+                        legend_name = (
+                            legend_names_list[i] if legend_names_list and i < len(legend_names_list)
+                            else str(group)
+                        )
+                        color = side_bar_colors[i] if i < len(side_bar_colors) else px.colors.qualitative.Plotly[i % len(px.colors.qualitative.Plotly)]
                         fig.add_trace(go.Bar(
                             x=x_vals,
                             y=y_vals,
-                            name=str(group),
-                            marker_color=bar_color,
+                            name=legend_name,
+                            marker_color=color,
                             offsetgroup=i,
-                            width=bar_width
+                            width=bar_width,
+                            marker_line_width=0
                         ))
-                    if show_average and len(plot_data) > 0 and plot_data[y_axis].notna().any():
-                        avg = plot_data[y_axis].mean()
-                        x0 = -0.4
-                        x1 = len(x_vals) - 0.6
-                        fig.add_shape(
-                            type="line",
-                            x0=x0, x1=x1,
-                            y0=avg, y1=avg,
-                            xref="x", yref="y",
-                            line=dict(color="red", dash="dash"),
-                        )
-                        fig.add_annotation(
-                            x=x1, y=avg, xref="x", yref="y", text=f"Avg: {avg:.2f}",
-                            showarrow=False, font=dict(color="red"), align="right"
-                        )
-                        average_drawn = True
-                    for idx in range(1, len(x_vals)):
-                        fig.add_shape(
-                            type="line",
-                            x0=idx-0.5, x1=idx-0.5,
-                            y0=0, y1=max([max(trace.y) if len(trace.y) > 0 else 0 for trace in fig.data]),
-                            line=dict(color="gray", dash="dash")
-                        )
-                    fig.update_layout(
-                        barmode='group',
-                        xaxis_title=x_axis,
-                        yaxis_title=y_axis,
-                        title=f"Grouped Bar with Separators: {y_axis} by {x_axis} and {group_column}"
-                    )
-                st.plotly_chart(fig, use_container_width=True)
-                if show_average and not average_drawn:
-                    st.info("Average line could not be drawn (insufficient data or all values missing).")
-                st.markdown("<h4 style='color:#2a5298;margin-top:20px;'>📊 Summary Statistics</h4>", unsafe_allow_html=True)
-                if plot_type == "Grouped Bar":
-                    stats_df = filtered_df[[x_axis, y_axis]][y_axis].describe().round(2)
-                    st.dataframe(
-                        pd.DataFrame(stats_df).T,
-                        use_container_width=True
-                    )
-                elif plot_type == "Stacked Bar":
-                    stats_df = filtered_df[[x_axis, stack_column, y_axis]].groupby(stack_column)[y_axis].describe().round(2)
-                    st.dataframe(
-                        stats_df,
-                        use_container_width=True
-                    )
-                else:
-                    stats_df = plot_data.groupby(group_column)[y_axis].describe().round(2)
-                    st.dataframe(
-                        stats_df,
-                        use_container_width=True
-                    )
-        else:
-            st.info("🧾 Need both categorical and numeric columns for plotting!")
+                    if show_average and not means_df.empty:
+                        avg = means_df[y_axis].mean()
+                        fig.add_hline(y=avg, line_dash='dash', line_color='red', annotation_text=f"Avg: {avg:.2f}", annotation_position="top right")
+                    title = f"Side by Side Bar: {agg_func} of {y_axis} by {x_axis} and {group_column}"
 
-else:
-    st.markdown("👆 <span style='color:#2a5298;font-size:17px;'>Upload a dataset to get started.</span>", unsafe_allow_html=True)
+            elif plot_type == "Simple Line Plot":
+                y_data = filtered_df[[x_axis, y_axis]].dropna()
+                legend_name = legend_names_list[0] if legend_names_list else y_axis
+                fig.add_trace(go.Scatter(
+                    x=y_data[x_axis], y=y_data[y_axis],
+                    mode='lines+markers',
+                    name=legend_name
+                ))
+                if show_average and not y_data.empty:
+                    avg = y_data[y_axis].mean()
+                    fig.add_shape(
+                        type="line",
+                        x0=min(y_data[x_axis]), x1=max(y_data[x_axis]),
+                        y0=avg, y1=avg,
+                        line=dict(color="red", dash="dash"),
+                        xref='x', yref='y'
+                    )
+                    fig.add_annotation(
+                        x=1, y=avg,
+                        xref='paper', yref='y',
+                        text=f"Avg: {avg:.2f}",
+                        showarrow=False,
+                        font=dict(color="red", size=12),
+                        xanchor='right',
+                        yanchor='bottom'
+                    )
+                title = f"Line Plot: {y_axis} by {x_axis}"
+
+            elif plot_type == "Grouped Line Plot":
+                plot_data = filtered_df[[x_axis, group_column, y_axis]].dropna()
+                unique_names = plot_data[group_column].unique()
+                for idx, group in enumerate(unique_names):
+                    df_group = plot_data[plot_data[group_column] == group]
+                    legend_name = (
+                        legend_names_list[idx] if legend_names_list and idx < len(legend_names_list)
+                        else str(group)
+                    )
+                    fig.add_trace(go.Scatter(
+                        x=df_group[x_axis],
+                        y=df_group[y_axis],
+                        mode='lines+markers',
+                        name=legend_name
+                    ))
+                title = f"Grouped Line Plot: {y_axis} by {x_axis}, grouped by {group_column}"
+
+            elif plot_type == "Scatter Plot":
+                color_col = None if scatter_color == "None" else scatter_color
+                size_col = None if scatter_size == "None" else scatter_size
+                plot_df = df[[scatter_x_axis, scatter_y_axis] + ([color_col] if color_col else []) + ([size_col] if size_col else [])].dropna()
+                if color_col and size_col and color_col in categorical_cols and size_col in numeric_cols:
+                    unique_names = plot_df[color_col].unique()
+                    for idx, group in enumerate(unique_names):
+                        group_df = plot_df[plot_df[color_col] == group]
+                        legend_name = (
+                            legend_names_list[idx] if legend_names_list and idx < len(legend_names_list)
+                            else str(group)
+                        )
+                        fig.add_trace(go.Scatter(
+                            x=group_df[scatter_x_axis],
+                            y=group_df[scatter_y_axis],
+                            mode='markers',
+                            marker=dict(
+                                size=group_df[size_col]*10/np.max(group_df[size_col]) if np.max(group_df[size_col]) > 0 else 10,
+                                opacity=0.7,
+                                line=dict(width=1, color='DarkSlateGrey')
+                            ),
+                            name=legend_name,
+                            text=group_df.index
+                        ))
+                elif color_col and color_col in categorical_cols:
+                    unique_names = plot_df[color_col].unique()
+                    for idx, group in enumerate(unique_names):
+                        group_df = plot_df[plot_df[color_col] == group]
+                        legend_name = (
+                            legend_names_list[idx] if legend_names_list and idx < len(legend_names_list)
+                            else str(group)
+                        )
+                        fig.add_trace(go.Scatter(
+                            x=group_df[scatter_x_axis],
+                            y=group_df[scatter_y_axis],
+                            mode='markers',
+                            marker=dict(size=10, opacity=0.7, line=dict(width=1, color='DarkSlateGrey')),
+                            name=legend_name,
+                            text=group_df.index
+                        ))
+                else:
+                    legend_name = legend_names_list[0] if legend_names_list else f"{scatter_y_axis} vs {scatter_x_axis}"
+                    fig.add_trace(go.Scatter(
+                        x=plot_df[scatter_x_axis],
+                        y=plot_df[scatter_y_axis],
+                        mode='markers',
+                        marker=dict(
+                            size=plot_df[size_col]*10/np.max(plot_df[size_col]) if size_col and np.max(plot_df[size_col]) > 0 else 10,
+                            color='rgba(30,60,114,0.6)',
+                            opacity=0.7,
+                            line=dict(width=1, color='DarkSlateGrey')
+                        ),
+                        name=legend_name,
+                        text=plot_df.index
+                    ))
+                if show_average and not plot_df.empty:
+                    avg = plot_df[scatter_y_axis].mean()
+                    fig.add_shape(
+                        type="line",
+                        x0=min(plot_df[scatter_x_axis]), x1=max(plot_df[scatter_x_axis]),
+                        y0=avg, y1=avg,
+                        line=dict(color="red", dash="dash"),
+                        xref='x', yref='y'
+                    )
+                    fig.add_annotation(
+                        x=1, y=avg,
+                        xref='paper', yref='y',
+                        text=f"Avg: {avg:.2f}",
+                        showarrow=False,
+                        font=dict(color="red", size=12),
+                        xanchor='right',
+                        yanchor='bottom'
+                    )
+                title = f"Scatter Plot: {scatter_y_axis} vs {scatter_x_axis}"
+
+            final_title = custom_title if 'custom_title' in locals() and custom_title else title
+            final_x_label = custom_x_label if 'custom_x_label' in locals() and custom_x_label else (
+                scatter_x_axis if plot_type == "Scatter Plot" else x_axis
+            )
+            final_y_label = custom_y_label if 'custom_y_label' in locals() and custom_y_label else (
+                scatter_y_axis if plot_type == "Scatter Plot" else y_axis
+            )
+
+            if plot_type == "Grouped Bar":
+                fig.update_layout(width=plot_width, height=plot_height)
+            elif plot_type == "Stacked Bar":
+                fig.update_layout(width=plot_width, height=plot_height)
+
+            fig.update_layout(
+                title=final_title,
+                xaxis_title=final_x_label,
+                yaxis_title=final_y_label,
+                yaxis=dict(showgrid=False, tickfont=dict(size=yaxis_font_size)),
+                xaxis=dict(tickfont=dict(size=xaxis_font_size)),
+                bargap=0.05,
+                bargroupgap=0.0,
+                margin=dict(t=100, b=100)
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            st.session_state.charts["Visualization Chart"] = fig
+
+            colA, colB = st.columns(2)
+            with colA:
+                html_bytes = pio.to_html(fig, full_html=False).encode("utf-8")
+                st.download_button(
+                    label="Download Interactive HTML",
+                    data=html_bytes,
+                    file_name=f"plot.html",
+                    mime="text/html"
+                )
+            with colB:
+                if "Visualization Chart" in st.session_state.charts:
+                    current_fig = st.session_state.charts["Visualization Chart"]
+                    if current_fig is not None:
+                        img_bytes = save_plotly_as_png(current_fig)
+                        if img_bytes is not None:
+                            st.download_button(
+                                label="Download Static PNG",
+                                data=img_bytes,
+                                file_name="plot.png",
+                                mime="image/png"
+                            )
